@@ -41,9 +41,12 @@ class EmbeddingsWrapper:
         return self.embed_documents(docs)
 
 # Initialize the underlying TensorFlow model and tokenizer
+from transformers import TFDistilBertModel, DistilBertTokenizer
+
+# Load the model and tokenizer
 model_name = "distilbert-base-uncased"
-tokenizer = AutoTokenizer.from_pretrained(model_name)
-tf_model = TFAutoModel.from_pretrained(model_name)
+tokenizer = DistilBertTokenizer.from_pretrained(model_name)
+tf_model = TFDistilBertModel.from_pretrained(model_name)
 embeddings = EmbeddingsWrapper(tf_model, tokenizer)
 
 # Set up the Streamlit app interface
