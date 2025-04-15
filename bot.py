@@ -11,7 +11,8 @@ from langchain_groq import ChatGroq
 from langchain_core.runnables.history import RunnableWithMessageHistory
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_community.document_loaders import PyPDFLoader
-from langchain_community.embeddings import HuggingFaceEmbeddings
+from transformers import TFAutoModel, AutoTokenizer
+import tensorflow as tf
 
 # Load environment variables
 load_dotenv()
@@ -20,11 +21,30 @@ if not GROQ_API_KEY:
     st.error("Missing API keys! Please add them in .env or Streamlit Secrets.")
     st.stop()
 
-# Initialize the embedding model using HuggingFaceEmbeddings
-embeddings = HuggingFaceEmbeddings(
-    model_name="thenlper/gte-base",
-    model_kwargs={"device": "cpu"}
-)
+# Define a wrapper that makes the TensorFlow model callable
+class EmbeddingsWrapper:
+    def __init__(self, model, tokenizer):
+        self.model = model
+        self.tokenizer = tokenizer
+
+    def embed_documents(self, docs):
+        embeddings = []
+        for doc in docs:
+            inputs = self.tokenizer(doc, return_tensors="tf", truncation=True, padding=True)
+            outputs = self.model(**inputs)
+            # Use the mean of the token embeddings as the document embedding
+            doc_embedding = tf.reduce_mean(outputs.last_hidden_state, axis=1).numpy().tolist()
+            embeddings.append(doc_embedding)
+        return embeddings
+
+    def __call__(self, docs):
+        return self.embed_documents(docs)
+
+# Initialize the underlying TensorFlow model and tokenizer
+model_name = "distilbert-base-uncased"
+tokenizer = AutoTokenizer.from_pretrained(model_name)
+tf_model = TFAutoModel.from_pretrained(model_name)
+embeddings = EmbeddingsWrapper(tf_model, tokenizer)
 
 # Set up the Streamlit app interface
 st.title("Conversational RAG With PDF Uploads and Chat History")
@@ -43,7 +63,7 @@ if 'store' not in st.session_state:
     st.session_state.store = {}
 
 # Define PDF file source(s)
-predefined_pdfs = ["Health Montoring Box (CHATBOT).pdf"]
+predefined_pdfs = ["Health Monitoring Box (CHATBOT).pdf"]
 
 # Cache PDF loading/processing
 @st.cache_data
@@ -117,6 +137,11 @@ if predefined_pdfs:
     question_answer_chain = create_stuff_documents_chain(llm, qa_prompt)
     rag_chain = create_retrieval_chain(history_aware_retriever, question_answer_chain)
 
+    def extract_final_answer(response: str) -> str:
+        if "</think>" in response:
+            return response.split("</think>")[-1].strip()
+        return response.strip()
+
     def get_session_history(session: str) -> BaseChatMessageHistory:
         if session not in st.session_state.store:
             st.session_state.store[session] = ChatMessageHistory()
@@ -145,7 +170,10 @@ if predefined_pdfs:
                         config={"configurable": {"session_id": session_id}},
                     )
                     full_answer = response['answer']
-                    final_answer = full_answer.split("</think>")[-1].strip() if "</think>" in full_answer else full_answer.strip()
+                    if "</think>" in full_answer:
+                        final_answer = full_answer.split("</think>")[-1].strip()
+                    else:
+                        final_answer = full_answer.strip()
                     st.markdown(f"**Answer:** {final_answer}")
                     with st.expander("View Chat History"):
                         st.write(session_history.messages)
