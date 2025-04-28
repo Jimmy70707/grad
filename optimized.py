@@ -15,18 +15,14 @@ from langchain_groq import ChatGroq
 from langchain_core.runnables.history import RunnableWithMessageHistory
 from langchain_core.embeddings import Embeddings
 
-# 1. Dynamic-quantize the SentenceTransformer model
+# 1. Dynamically quantize your embedding model (cached)
 @st.cache_resource(ttl=3600)
 def load_quantized_model():
     model = SentenceTransformer('all-MiniLM-L6-v2', device='cpu')
-    qmodel = torch.quantization.quantize_dynamic(
-        model,
-        {torch.nn.Linear},
-        dtype=torch.qint8
+    return torch.quantization.quantize_dynamic(
+        model, {torch.nn.Linear}, dtype=torch.qint8
     )
-    return qmodel
 
-# 2. Wrap quantized model for LangChain
 class QuantizedEmbeddings(Embeddings):
     def __init__(self, model):
         self.model = model
@@ -37,68 +33,74 @@ class QuantizedEmbeddings(Embeddings):
     def embed_query(self, text):
         return self.model.encode([text], convert_to_numpy=True)[0].tolist()
 
-# 3. Keep-alive ping endpoint
+# 2. Lightweight “ping” endpoint to mitigate sleeping
 if "ping" in st.query_params:
     st.write("pong")
     st.stop()
 
-# 4. Load GROQ API key
+# 3. Load API key
 load_dotenv()
-#st.secrets.get("GROQ_API_KEY") or
-GROQ_API_KEY =  os.getenv("GROQ_API_KEY")
+GROQ_API_KEY = st.secrets.get("GROQ_API_KEY") or os.getenv("GROQ_API_KEY")
 if not GROQ_API_KEY:
-    st.error("Missing API keys!")
+    st.error("Missing GROQ_API_KEY! Add it to .env or Streamlit Secrets.")
     st.stop()
 
 st.title("Conversational RAG With PDF Uploads and Chat History")
 
-# 5. Cache PDF loading
+# 4. Cache PDF loading/splitting
 @st.cache_data(max_entries=3, persist="disk")
-def load_and_process_pdfs(paths):
+def load_and_process_pdfs(pdf_paths: list[str]):
     docs = []
-    for p in paths:
-        loader = PyPDFLoader(p)
-        docs.extend(loader.load())
+    for path in pdf_paths:
+        docs.extend(PyPDFLoader(path).load())
     return docs
 
-# 6. Cache FAISS index creation
+# 5. Cache FAISS index creation
 @st.cache_resource(ttl=3600)
-def generate_vectorstore(_docs):
-    splits = RecursiveCharacterTextSplitter(chunk_size=5000, chunk_overlap=500).split_documents(_docs)
-    embeddings = QuantizedEmbeddings(load_quantized_model())
-    return FAISS.from_documents(splits, embeddings)
+def generate_vectorstore(_docs: list):
+    splits = RecursiveCharacterTextSplitter(
+        chunk_size=5000, chunk_overlap=500
+    ).split_documents(_docs)
+    return FAISS.from_documents(splits, QuantizedEmbeddings(load_quantized_model()))
 
-# 7. Cache LLM client
+# 6. Cache your LLM client
 @st.cache_resource(ttl=3600)
 def load_llm():
-    return ChatGroq(groq_api_key=GROQ_API_KEY, model_name="deepseek-r1-distill-llama-70b")
+    return ChatGroq(
+        groq_api_key=GROQ_API_KEY,
+        model_name="deepseek-r1-distill-llama-70b"
+    )
 
-# Initialize sources
+# 7. Initialize resources
 documents = load_and_process_pdfs(["Health Montoring Box (CHATBOT).pdf"])
 vectorstore = generate_vectorstore(documents)
 retriever = vectorstore.as_retriever()
 llm = load_llm()
 
-# Build RAG chain (unchanged)
+# 8. Build RAG chain with revised system prompt
 contextualize_q_prompt = ChatPromptTemplate.from_messages([
-    ("system", "Given chat history + latest question, reformulate it into a standalone question."),
+    ("system", "Given chat history + latest user question, reformulate into a standalone question."),
     MessagesPlaceholder("chat_history"),
-    ("human", "{input}")
+    ("human", "{input}"),
 ])
-history_aware_retriever = create_history_aware_retriever(llm, retriever, contextualize_q_prompt)
+
+history_aware_retriever = create_history_aware_retriever(
+    llm, retriever, contextualize_q_prompt
+)
 
 system_prompt = (
-    "You are a medical assistant for question-answering tasks. "
-    "Use retrieved context to answer concisely. "
-    "If values are abnormal, advise consulting a doctor. "
-    "If unknown, say so. Keep answers to 1–2 sentences.\n\n"
+    "You are a medical assistant. Answer in 1–2 sentences, "
+    "include brief advice or abnormal ranges when relevant, "
+    "and do **not** output any chain-of-thought or `<think>` tags.\n\n"
     "{context}"
 )
+
 qa_prompt = ChatPromptTemplate.from_messages([
     ("system", system_prompt),
     MessagesPlaceholder("chat_history"),
     ("human", "{input}")
 ])
+
 question_answer_chain = create_stuff_documents_chain(llm, qa_prompt)
 rag_chain = create_retrieval_chain(history_aware_retriever, question_answer_chain)
 
@@ -108,28 +110,37 @@ def get_session_history(sid: str) -> BaseChatMessageHistory:
     return st.session_state[sid]
 
 conversational_rag_chain = RunnableWithMessageHistory(
-    rag_chain, get_session_history,
+    rag_chain,
+    get_session_history,
     input_messages_key="input",
     history_messages_key="chat_history",
     output_messages_key="answer"
 )
 
-# UI: Session ID & question input
+# 9. Strip out any <think> traces
+def extract_final_answer(response: str) -> str:
+    if "</think>" in response:
+        return response.split("</think>")[-1].strip()
+    return response.strip()
+
+# === UI ===
 session_id = st.text_input("Session ID", "default_session")
 user_input = st.text_input("Your question:", key="user_input")
-if st.button("Submit"):
-    history = get_session_history(session_id)
-    with st.spinner("Generating response..."):
-        output = conversational_rag_chain.invoke(
-            {"input": user_input},
-            config={"configurable": {"session_id": session_id}}
-        )
-        answer = output["answer"].strip()
-        st.markdown(f"**Answer:** {answer}")
-        with st.expander("Chat History"):
-            st.write(history.messages)
 
-# Clear history
+if st.button("Submit"):
+    if user_input:
+        with st.spinner("Generating response..."):
+            hist = get_session_history(session_id)
+            out = conversational_rag_chain.invoke(
+                {"input": user_input},
+                config={"configurable": {"session_id": session_id}}
+            )
+            raw = out["answer"]
+            answer = extract_final_answer(raw)
+            st.markdown(f"**Answer:** {answer}")
+            with st.expander("Chat History"):
+                st.write(hist.messages)
+
 if st.button("Clear Chat History"):
     st.session_state[session_id] = ChatMessageHistory()
     st.success("Chat history cleared!")
