@@ -1,18 +1,22 @@
 # Core framework
 streamlit
-
+torch
 # LangChain core & integrations
 langchain
 langchain-community
 langchain-text-splitters
 langchain-groq
+langchain-huggingface
+
+huggingface_hub[hf_xet]
 
 # Embeddings & vector store
 faiss-cpu
 
-# Transformers stack
+# Transformers stack (must match langchain-huggingface >= 0.1.0)
 transformers
-tensorflow
+tokenizers
+huggingface-hub
 
 # PDF parsing
 pypdf
@@ -20,6 +24,6 @@ pypdf
 # Environment variables
 python-dotenv
 
-# Required for numerical operations
+# Required 
 scipy
 numpy
