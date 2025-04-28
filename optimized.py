@@ -63,14 +63,12 @@ def generate_vectorstore(_docs: list):
     ).split_documents(_docs)
     return FAISS.from_documents(splits, QuantizedEmbeddings(load_quantized_model()))
 
-# 6. Cache your LLM client (now with stop sequence)
+# 6. Cache your LLM client (remove stop sequence so it actually speaks)
 @st.cache_resource(ttl=3600)
 def load_llm():
-    # Added `stop=["<think>"]` so the model will never output its internal reasoning tags.
     return ChatGroq(
         groq_api_key=GROQ_API_KEY,
         model_name="deepseek-r1-distill-llama-70b",
-        stop=["<think>"],
     )
 
 # 7. Initialize resources
@@ -119,7 +117,13 @@ conversational_rag_chain = RunnableWithMessageHistory(
     output_messages_key="answer"
 )
 
-# 9. UI
+# 9. Use your original extractor to strip out THINK blocks
+def extract_final_answer(response: str) -> str:
+    if "</think>" in response:
+        return response.split("</think>")[-1].strip()
+    return response.strip()
+
+# === UI ===
 session_id = st.text_input("Session ID", "default_session")
 user_input = st.text_input("Your question:", key="user_input")
 
@@ -131,7 +135,8 @@ if st.button("Submit"):
                 {"input": user_input},
                 config={"configurable": {"session_id": session_id}}
             )
-            answer = out["answer"].strip()
+            raw = out["answer"]
+            answer = extract_final_answer(raw)
             st.markdown(f"**Answer:** {answer}")
             with st.expander("Chat History"):
                 st.write(hist.messages)
