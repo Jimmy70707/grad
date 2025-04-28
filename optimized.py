@@ -63,12 +63,14 @@ def generate_vectorstore(_docs: list):
     ).split_documents(_docs)
     return FAISS.from_documents(splits, QuantizedEmbeddings(load_quantized_model()))
 
-# 6. Cache your LLM client
+# 6. Cache your LLM client (now with stop sequence)
 @st.cache_resource(ttl=3600)
 def load_llm():
+    # Added `stop=["<think>"]` so the model will never output its internal reasoning tags.
     return ChatGroq(
         groq_api_key=GROQ_API_KEY,
-        model_name="deepseek-r1-distill-llama-70b"
+        model_name="deepseek-r1-distill-llama-70b",
+        stop=["<think>"],
     )
 
 # 7. Initialize resources
@@ -91,7 +93,7 @@ history_aware_retriever = create_history_aware_retriever(
 system_prompt = (
     "You are a medical assistant. Answer in 1–2 sentences, "
     "include brief advice or abnormal ranges when relevant, "
-    "and do **not** output any chain-of-thought or `<think>` tags.\n\n"
+    "and do not output any chain-of-thought or `<think>` tags.\n\n"
     "{context}"
 )
 
@@ -117,13 +119,7 @@ conversational_rag_chain = RunnableWithMessageHistory(
     output_messages_key="answer"
 )
 
-# 9. Strip out any <think> traces
-def extract_final_answer(response: str) -> str:
-    if "</think>" in response:
-        return response.split("</think>")[-1].strip()
-    return response.strip()
-
-# === UI ===
+# 9. UI
 session_id = st.text_input("Session ID", "default_session")
 user_input = st.text_input("Your question:", key="user_input")
 
@@ -135,8 +131,7 @@ if st.button("Submit"):
                 {"input": user_input},
                 config={"configurable": {"session_id": session_id}}
             )
-            raw = out["answer"]
-            answer = extract_final_answer(raw)
+            answer = out["answer"].strip()
             st.markdown(f"**Answer:** {answer}")
             with st.expander("Chat History"):
                 st.write(hist.messages)
